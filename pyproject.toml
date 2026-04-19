@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wilkos-map-editor"
+version = "0.1.0"
+description = "Desktop scene, sprite, and pixel animation editor."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pillow>=10.0.0,<12.0.0",
+  "pygame>=2.5.2,<3.0.0",
+  "PySide6>=6.7,<7",
+]
+
+[project.scripts]
+wilkos = "wilkos:main"
+
+[tool.setuptools]
+py-modules = ["app", "constants", "models", "wilkos"]
