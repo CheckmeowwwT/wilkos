@@ -13,6 +13,12 @@ from tkinter import filedialog
 
 import pygame
 from PIL import Image, ImageSequence
+try:
+    from PySide6 import QtCore, QtGui, QtWidgets
+except Exception:
+    QtCore = None  # type: ignore[assignment]
+    QtGui = None  # type: ignore[assignment]
+    QtWidgets = None  # type: ignore[assignment]
 
 try:
     from .constants import (
@@ -98,8 +104,12 @@ class SceneEditorApp:
         self.legacy_asset_dir = self.asset_root / "images" / "dungeon"
         self.project_path = self.asset_root / "maps" / "scenes_project.json"
         self.scene_dir = self.asset_root / "maps" / "scenes"
+        self.scene_asset_dir = self.asset_root / "scenes"
+        self.scene_json_dir = self.root / "json_scenes"
         self.asset_root.mkdir(parents=True, exist_ok=True)
         self.scene_dir.mkdir(parents=True, exist_ok=True)
+        self.scene_asset_dir.mkdir(parents=True, exist_ok=True)
+        self.scene_json_dir.mkdir(parents=True, exist_ok=True)
 
         self.min_window_size = (1100, 760)
         self.screen_width = 1440
@@ -134,6 +144,8 @@ class SceneEditorApp:
         self.workspace_mode = "scene"
         self.dropdown_open: str | None = None
         self.drag_asset_path: str | None = None
+        self.native_drag_asset_rel: str | None = None
+        self.native_drag_origin: tuple[int, int] | None = None
         self.drag_pos: tuple[int, int] = (0, 0)
         self.duplicate_drag_mode = False
         self.duplicate_dragging = False
@@ -313,6 +325,7 @@ class SceneEditorApp:
         self.custom_scene_width_input = str(self.pending_scene_size[0])
         self.custom_scene_height_input = str(self.pending_scene_size[1])
         self.scene_size_focus: str | None = None
+        self.scene_name_input = ""
         self.folder_name_input = ""
 
         self.current_asset_dir = self.asset_root
@@ -322,6 +335,8 @@ class SceneEditorApp:
         self.image_cache: dict[str, pygame.Surface] = {}
         self.animation_cache: dict[str, tuple[list[pygame.Surface], list[int]]] = {}
         self.scaled_cache: dict[tuple[str, int, int, int], pygame.Surface] = {}
+        self._qt_drag_app: object | None = None
+        self._qt_drag_source: object | None = None
         self.image_size_cache: dict[str, tuple[int, int]] = {}
         self.legacy_asset_paths = self._load_legacy_asset_paths()
         self.merged_asset_dir = self.asset_root / "merged assets"
@@ -721,6 +736,73 @@ class SceneEditorApp:
                 return index
         return len(durations) - 1
 
+    def _ensure_native_drag_source(self):
+        if QtWidgets is None or QtCore is None:
+            return None
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+        self._qt_drag_app = app
+        source = self._qt_drag_source
+        if source is None:
+            source = QtWidgets.QWidget()
+            source.setWindowFlag(QtCore.Qt.WindowType.FramelessWindowHint, True)
+            source.setWindowFlag(QtCore.Qt.WindowType.Tool, True)
+            source.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            source.setWindowOpacity(0.01)
+            source.resize(1, 1)
+            self._qt_drag_source = source
+        return source
+
+    def _queue_native_asset_drag(self, rel_path: str, origin: tuple[int, int]) -> None:
+        self.native_drag_asset_rel = rel_path
+        self.native_drag_origin = origin
+        self.status = f"Drag {Path(rel_path).name} out of the window to copy it."
+
+    def _cancel_native_asset_drag(self) -> None:
+        self.native_drag_asset_rel = None
+        self.native_drag_origin = None
+
+    def _start_native_asset_drag(self, rel_path: str) -> bool:
+        if QtCore is None or QtGui is None or QtWidgets is None:
+            self.status = "Native file drag is unavailable on this build."
+            return False
+        path = (self.asset_root / rel_path).resolve()
+        if not path.exists():
+            self.status = "That asset no longer exists."
+            return False
+        source = self._ensure_native_drag_source()
+        if source is None:
+            self.status = "Native file drag could not be started."
+            return False
+        if QtGui is not None:
+            cursor_pos = QtGui.QCursor.pos()
+            source.move(cursor_pos.x(), cursor_pos.y())
+        source.show()
+        source.raise_()
+        mime = QtCore.QMimeData()
+        mime.setUrls([QtCore.QUrl.fromLocalFile(str(path))])
+        drag = QtGui.QDrag(source)
+        drag.setMimeData(mime)
+        if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
+            preview = self._get_preview_for_image(path)
+            rgba = pygame.image.tobytes(preview, "RGBA")
+            image = QtGui.QImage(
+                rgba,
+                preview.get_width(),
+                preview.get_height(),
+                preview.get_width() * 4,
+                QtGui.QImage.Format.Format_RGBA8888,
+            ).copy()
+            drag.setPixmap(QtGui.QPixmap.fromImage(image))
+            drag.setHotSpot(QtCore.QPoint(preview.get_width() // 2, preview.get_height() // 2))
+        if self._qt_drag_app is not None:
+            self._qt_drag_app.processEvents()
+        drag.exec(QtCore.Qt.DropAction.CopyAction)
+        source.hide()
+        self.status = f"Dragged out {path.name}."
+        return True
+
     def _image_size_for(self, rel_path: str) -> tuple[int, int] | None:
         asset_path = self.asset_root / rel_path
         cache_key = asset_path.as_posix()
@@ -779,6 +861,14 @@ class SceneEditorApp:
 
     def _sprite_render_surface(self, sprite: SpritePlacement, ticks_ms: int) -> pygame.Surface | None:
         base = self._get_asset_surface(sprite.asset_path, (max(1, int(sprite.width)), max(1, int(sprite.height))), ticks_ms)
+        if base is None:
+            return None
+        return self._apply_xyz_rotation(base, sprite)
+
+    def _sprite_screen_surface(self, sprite: SpritePlacement, ticks_ms: int) -> pygame.Surface | None:
+        draw_w = max(1, int(sprite.width * self.zoom))
+        draw_h = max(1, int(sprite.height * self.zoom))
+        base = self._get_asset_surface(sprite.asset_path, (draw_w, draw_h), ticks_ms)
         if base is None:
             return None
         return self._apply_xyz_rotation(base, sprite)
@@ -894,7 +984,7 @@ class SceneEditorApp:
         buttons = self._menu_buttons()
         base = buttons[menu_name]
         if menu_name == "file":
-            item_count = 4
+            item_count = 5
         elif menu_name == "scene":
             item_count = 2
         else:
@@ -903,7 +993,7 @@ class SceneEditorApp:
 
     def _menu_items(self, menu_name: str) -> list[tuple[str, pygame.Rect]]:
         if menu_name == "file":
-            names = ["New", "Open", "Save", "Export PNG"]
+            names = ["New", "Open", "Save", "Export PNG", "Export GIF"]
         elif menu_name == "scene":
             names = ["New Scene", "Save Scene"]
         elif menu_name == "canvas_export":
@@ -1033,6 +1123,7 @@ class SceneEditorApp:
         if not self.selected_asset_rel:
             self.status = "Select an asset or folder to delete."
             return
+        scene_json_target = self._saved_scene_json_for_asset(self.selected_asset_rel)
         target = (self.asset_root / self.selected_asset_rel).resolve()
         try:
             target.relative_to(self.asset_root.resolve())
@@ -1049,6 +1140,8 @@ class SceneEditorApp:
             shutil.rmtree(target)
         else:
             target.unlink()
+        if scene_json_target is not None and scene_json_target.exists():
+            scene_json_target.unlink()
         if self.canvas_asset_rel == self.selected_asset_rel:
             self.canvas_asset_rel = None
         self.preview_cache.pop(f"preview:{target.as_posix()}", None)
@@ -1294,15 +1387,111 @@ class SceneEditorApp:
 
     def _save_scene(self) -> None:
         scene = self.active_scene
-        path = self.scene_dir / f"{self._safe_scene_filename(scene.name)}.json"
+        safe_name = self._safe_scene_filename(scene.name)
+        path = self.scene_json_dir / f"{safe_name}.json"
         payload = {
             "name": scene.name,
             "board_width": scene.board_width,
             "board_height": scene.board_height,
             "sprites": [self._sprite_to_payload(sprite) for sprite in scene.sprites],
         }
+        self.scene_json_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        self.status = f"Saved scene: {path.name}"
+        preview_path = self.scene_asset_dir / f"{safe_name}.png"
+        surface, _ = self._render_scene_surface(only_ids=None)
+        pygame.image.save(surface, preview_path.as_posix())
+        self.preview_cache.pop(f"preview:{preview_path.as_posix()}", None)
+        self.image_cache.pop(preview_path.as_posix(), None)
+        self.animation_cache.pop(preview_path.as_posix(), None)
+        self.image_size_cache.pop(preview_path.as_posix(), None)
+        self._refresh_assets()
+        self.status = f"Saved scene: {path.name} and {preview_path.name}"
+
+    def _save_scene_dialog_layout(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect]:
+        panel = pygame.Rect(0, 0, 520, 196)
+        panel.center = (self.screen_width // 2, self.screen_height // 2)
+        input_rect = pygame.Rect(panel.x + 20, panel.y + 82, panel.width - 40, 40)
+        save_rect = pygame.Rect(panel.right - 222, panel.bottom - 52, 96, 36)
+        cancel_rect = pygame.Rect(panel.right - 114, panel.bottom - 52, 96, 36)
+        return panel, input_rect, save_rect, cancel_rect
+
+    def _open_save_scene_dialog(self) -> None:
+        self.scene_name_input = self.active_scene.name.strip() or f"Scene {self.active_scene_idx + 1}"
+        self.dialog_mode = "save_scene"
+        self.status = "Name the scene, then save it."
+
+    def _confirm_save_scene(self) -> None:
+        name = self.scene_name_input.strip()
+        if not name:
+            self.status = "Scene name cannot be empty."
+            return
+        self.active_scene.name = name
+        self.dialog_mode = None
+        self._save_scene()
+
+    def _load_scene_file(self, path: Path) -> SceneDef | None:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(raw, dict):
+            return None
+        name = str(raw.get("name", path.stem))
+        board_width = max(int(raw.get("board_width", 960)), 32)
+        board_height = max(int(raw.get("board_height", 540)), 32)
+        scene = SceneDef(name=name, board_width=board_width, board_height=board_height)
+        sprites_raw = raw.get("sprites")
+        if isinstance(sprites_raw, list):
+            for sprite_row in sprites_raw:
+                if not isinstance(sprite_row, dict):
+                    continue
+                sprite = self._sprite_from_payload(sprite_row)
+                if sprite is None:
+                    continue
+                self._clamp_sprite_to_scene(sprite, scene)
+                scene.sprites.append(sprite)
+        return scene
+
+    def _saved_scene_json_for_asset(self, rel_path: str) -> Path | None:
+        normalized = rel_path.replace("\\", "/").lstrip("/")
+        rel = Path(normalized)
+        if not rel.parts or rel.parts[0] != "scenes":
+            return None
+        target = self.scene_json_dir / f"{rel.stem}.json"
+        return target if target.exists() else None
+
+    def _place_saved_scene_asset(self, rel_path: str, local_pos: tuple[float, float]) -> bool:
+        json_path = self._saved_scene_json_for_asset(rel_path)
+        if json_path is None:
+            return False
+        loaded_scene = self._load_scene_file(json_path)
+        if loaded_scene is None or not loaded_scene.sprites:
+            self.status = f"Could not load scene data for {Path(rel_path).name}."
+            return True
+
+        self._push_scene_undo()
+        offset_x = local_pos[0] - (loaded_scene.board_width / 2.0)
+        offset_y = local_pos[1] - (loaded_scene.board_height / 2.0)
+        new_ids: set[int] = set()
+        for source in loaded_scene.sprites:
+            sprite = SpritePlacement(
+                sprite_id=self.next_sprite_id,
+                asset_path=source.asset_path,
+                x=source.x + offset_x,
+                y=source.y + offset_y,
+                width=source.width,
+                height=source.height,
+                rotation_x=source.rotation_x,
+                rotation_y=source.rotation_y,
+                rotation_z=source.rotation_z,
+            )
+            self.next_sprite_id += 1
+            self._clamp_sprite_to_scene(sprite)
+            self.active_scene.sprites.append(sprite)
+            new_ids.add(sprite.sprite_id)
+        self._set_selection(new_ids)
+        self.status = f"Loaded scene {loaded_scene.name} into the board."
+        return True
 
     def _parse_custom_scene_size(self) -> tuple[int, int] | None:
         try:
@@ -4724,6 +4913,34 @@ class SceneEditorApp:
                 return sprite
         return None
 
+    def _sprite_at_screen(self, screen_pos: tuple[int, int]) -> SpritePlacement | None:
+        ticks_ms = pygame.time.get_ticks()
+        for sprite in reversed(self.active_scene.sprites):
+            sprite_rect = self._sprite_screen_rect(sprite)
+            if not sprite_rect.collidepoint(screen_pos):
+                continue
+
+            asset_path = self.asset_root / sprite.asset_path
+            if asset_path.suffix.lower() != ".gif":
+                return sprite
+
+            rendered = self._sprite_screen_surface(sprite, ticks_ms)
+            if rendered is None:
+                return sprite
+
+            rendered_rect = rendered.get_rect(center=sprite_rect.center)
+            if not rendered_rect.collidepoint(screen_pos):
+                continue
+
+            sample_x = int(screen_pos[0] - rendered_rect.x)
+            sample_y = int(screen_pos[1] - rendered_rect.y)
+            if not (0 <= sample_x < rendered.get_width() and 0 <= sample_y < rendered.get_height()):
+                continue
+            if rendered.get_at((sample_x, sample_y)).a <= 8:
+                continue
+            return sprite
+        return None
+
     def _selected_sprite(self) -> SpritePlacement | None:
         if self.selected_sprite_id is not None:
             sprite = self._sprite_by_id(self.selected_sprite_id)
@@ -5115,8 +5332,8 @@ class SceneEditorApp:
             else:
                 sprite.rotation_z = (base_z + delta) % 360.0
 
-    def _render_scene_surface(self, only_ids: set[int] | None = None) -> tuple[pygame.Surface, pygame.Rect]:
-        ticks = pygame.time.get_ticks()
+    def _render_scene_surface(self, only_ids: set[int] | None = None, ticks_ms: int | None = None) -> tuple[pygame.Surface, pygame.Rect]:
+        ticks = pygame.time.get_ticks() if ticks_ms is None else ticks_ms
         sprites = self.active_scene.sprites if only_ids is None else [s for s in self.active_scene.sprites if s.sprite_id in only_ids]
         if only_ids is None:
             bounds = pygame.Rect(0, 0, self.active_scene.board_width, self.active_scene.board_height)
@@ -5189,9 +5406,92 @@ class SceneEditorApp:
         surface, _ = self._render_scene_surface(only_ids=None)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{self._safe_scene_filename(self.active_scene.name)}_{timestamp}.png"
-        target = self.exported_asset_dir / filename
+        target = self._unique_export_path(self.exported_asset_dir / filename)
         pygame.image.save(surface, target.as_posix())
         self.status = f"Exported scene PNG to assets/{target.relative_to(self.asset_root).as_posix()}."
+
+    def _scene_export_timeline(self) -> tuple[list[int], list[int]]:
+        unique_paths: list[str] = []
+        seen: set[str] = set()
+        for sprite in self.active_scene.sprites:
+            rel_path = sprite.asset_path
+            if rel_path in seen:
+                continue
+            seen.add(rel_path)
+            unique_paths.append(rel_path)
+
+        animated: list[list[int]] = []
+        cycle_ms = 0
+        for rel_path in unique_paths:
+            asset_path = self.asset_root / rel_path
+            if asset_path.suffix.lower() != ".gif":
+                continue
+            try:
+                frames, durations = self._load_asset_frames(asset_path)
+            except pygame.error:
+                continue
+            if len(frames) <= 1 or not durations:
+                continue
+            cleaned = [max(40, int(duration)) for duration in durations]
+            animated.append(cleaned)
+            cycle_ms = max(cycle_ms, sum(cleaned))
+
+        if not animated or cycle_ms <= 0:
+            return [0], [100]
+
+        boundaries: set[int] = {0}
+        for durations in animated:
+            elapsed = 0
+            idx = 0
+            while elapsed < cycle_ms:
+                boundaries.add(elapsed)
+                elapsed += durations[idx % len(durations)]
+                idx += 1
+
+        times = sorted(t for t in boundaries if 0 <= t < cycle_ms)
+        if not times or times[0] != 0:
+            times.insert(0, 0)
+
+        max_frames = 180
+        if len(times) > max_frames:
+            step = cycle_ms / max_frames
+            times = sorted({min(cycle_ms - 1, int(round(i * step))) for i in range(max_frames)})
+            if not times or times[0] != 0:
+                times.insert(0, 0)
+
+        durations_ms: list[int] = []
+        for idx, start in enumerate(times):
+            end = times[idx + 1] if idx + 1 < len(times) else cycle_ms
+            durations_ms.append(max(40, end - start))
+        return times, durations_ms
+
+    def _export_active_scene_gif(self) -> None:
+        frame_times, frame_durations = self._scene_export_timeline()
+        surfaces = [self._render_scene_surface(only_ids=None, ticks_ms=ticks)[0] for ticks in frame_times]
+        if not surfaces:
+            self.status = "Nothing to export."
+            return
+
+        self.exported_asset_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self._safe_scene_filename(self.active_scene.name)}_{timestamp}.gif"
+        target = self._unique_export_path(self.exported_asset_dir / filename)
+        pil_frames = [self._surface_to_pil_image(frame) for frame in surfaces]
+        first, rest = pil_frames[0], pil_frames[1:]
+        duration: int | list[int] = frame_durations[0] if len(frame_durations) == 1 else frame_durations
+        first.save(
+            target,
+            save_all=True,
+            append_images=rest,
+            duration=duration,
+            loop=0,
+            disposal=2,
+        )
+        self.preview_cache.pop(f"preview:{target.as_posix()}", None)
+        self.animation_cache.pop(target.as_posix(), None)
+        self.image_size_cache.pop(target.as_posix(), None)
+        self._refresh_assets()
+        self.status = f"Exported scene GIF to assets/{target.relative_to(self.asset_root).as_posix()}."
 
     def _handle_menu_click(self, pos: tuple[int, int]) -> bool:
         buttons = self._menu_buttons()
@@ -5228,11 +5528,13 @@ class SceneEditorApp:
                             self._save_project()
                         elif label == "Export PNG":
                             self._export_active_scene_png()
+                        elif label == "Export GIF":
+                            self._export_active_scene_gif()
                     elif self.dropdown_open == "scene":
                         if label == "New Scene":
                             self._open_new_scene_dialog()
                         elif label == "Save Scene":
-                            self._save_scene()
+                            self._open_save_scene_dialog()
                     elif self.dropdown_open == "canvas_export":
                         if label == "Export PNG":
                             self._export_canvas_png()
@@ -5430,6 +5732,8 @@ class SceneEditorApp:
         return panel.collidepoint(pos)  # swallow any other click in panel
 
     def _handle_asset_browser_click(self, pos: tuple[int, int]) -> bool:
+        modifiers = pygame.key.get_mods()
+        cmd_held = bool(modifiers & (pygame.KMOD_META | pygame.KMOD_CTRL))
         # In canvas mode without asset browser open, dispatch to canvas bottom panel
         if self.workspace_mode == "canvas" and not self.canvas_assets_open:
             return self._handle_canvas_bottom_panel_click(pos)
@@ -5475,6 +5779,9 @@ class SceneEditorApp:
         if entry is None:
             return True
         self.selected_asset_rel = entry.rel_path
+        if cmd_held:
+            self._queue_native_asset_drag(entry.rel_path, pos)
+            return True
         if entry.is_dir:
             self._change_asset_dir(entry.path)
         else:
@@ -5675,6 +5982,29 @@ class SceneEditorApp:
                 return True
             return event.type in {pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION, pygame.MOUSEWHEEL}
 
+        if self.dialog_mode == "save_scene":
+            _, _, save_rect, cancel_rect = self._save_scene_dialog_layout()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self.dialog_mode = None
+                    self.status = "Save scene cancelled."
+                elif event.key == pygame.K_RETURN:
+                    self._confirm_save_scene()
+                elif event.key == pygame.K_BACKSPACE:
+                    self.scene_name_input = self.scene_name_input[:-1]
+                else:
+                    if event.unicode and event.unicode.isprintable() and event.unicode not in {"\r", "\n"}:
+                        self.scene_name_input += event.unicode
+                return True
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if save_rect.collidepoint(event.pos):
+                    self._confirm_save_scene()
+                elif cancel_rect.collidepoint(event.pos):
+                    self.dialog_mode = None
+                    self.status = "Save scene cancelled."
+                return True
+            return event.type in {pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION, pygame.MOUSEWHEEL}
+
         if self.dialog_mode == "color_picker":
             panel, wheel, value, _, alpha_rect, apply_rect, cancel_rect = self._canvas_color_picker_layout()
             if event.type == pygame.KEYDOWN:
@@ -5839,15 +6169,12 @@ class SceneEditorApp:
         pygame.draw.rect(screen, (150, 150, 156), scene_rect, 1)
 
         for sprite in self.active_scene.sprites:
-            sprite_w = max(1, int(sprite.width * self.zoom))
-            sprite_h = max(1, int(sprite.height * self.zoom))
             sprite_rect = self._sprite_screen_rect(sprite)
-            tile = self._get_asset_surface(sprite.asset_path, (sprite_w, sprite_h), pygame.time.get_ticks())
-            if tile is None:
+            transformed = self._sprite_screen_surface(sprite, pygame.time.get_ticks())
+            if transformed is None:
                 pygame.draw.rect(screen, (90, 60, 62), sprite_rect)
                 pygame.draw.rect(screen, (180, 130, 136), sprite_rect, 1)
             else:
-                transformed = self._apply_xyz_rotation(tile, sprite)
                 transformed_rect = transformed.get_rect(center=sprite_rect.center)
                 screen.blit(transformed, transformed_rect)
 
@@ -7181,6 +7508,24 @@ class SceneEditorApp:
                 screen.blit(text, text.get_rect(center=rect.center))
             return
 
+        if self.dialog_mode == "save_scene":
+            panel, input_rect, save_rect, cancel_rect = self._save_scene_dialog_layout()
+            self._draw_shadowed_panel(screen, panel, (34, 34, 38), (132, 132, 138), radius=22)
+            screen.blit(font.render("Save Scene", True, (246, 248, 255)), (panel.x + 22, panel.y + 20))
+            subtitle = "Name the scene. A preview PNG goes to assets/scenes and the editable data goes to json_scenes."
+            screen.blit(small.render(subtitle, True, (186, 186, 192)), (panel.x + 22, panel.y + 52))
+            pygame.draw.rect(screen, (12, 18, 28), input_rect)
+            pygame.draw.rect(screen, (132, 132, 138), input_rect, 1)
+            value = self._input_display_text(self.scene_name_input, True, "")
+            color = (244, 248, 255) if self.scene_name_input else (180, 180, 186)
+            screen.blit(font.render(value, True, color), (input_rect.x + 12, input_rect.y + 9))
+            for rect, label in [(save_rect, "Save"), (cancel_rect, "Cancel")]:
+                pygame.draw.rect(screen, (58, 58, 64), rect)
+                pygame.draw.rect(screen, (136, 136, 142), rect, 1)
+                text = small.render(label, True, (240, 246, 255))
+                screen.blit(text, text.get_rect(center=rect.center))
+            return
+
         if self.dialog_mode == "canvas_rename":
             panel, input_rect, save_rect, cancel_rect = self._canvas_rename_dialog_layout()
             self._draw_shadowed_panel(screen, panel, (34, 34, 38), (132, 132, 138), radius=22)
@@ -7602,7 +7947,12 @@ class SceneEditorApp:
                             if resized:
                                 continue
 
-                            sprite = self._sprite_at(local)
+                            selection_rect = self._selection_screen_rect()
+                            sprite = None
+                            if selection_rect is not None and selection_rect.collidepoint(event.pos):
+                                sprite = self._selected_sprite()
+                            if sprite is None:
+                                sprite = self._sprite_at_screen(event.pos)
                             if sprite is not None:
                                 if additive_select:
                                     ids = set(self.selected_sprite_ids)
@@ -7664,6 +8014,7 @@ class SceneEditorApp:
                         self.pan_origin = (self.camera_x, self.camera_y)
                 elif event.type == pygame.MOUSEBUTTONUP:
                     if event.button == 1:
+                        self._cancel_native_asset_drag()
                         self._handle_canvas_mouse_up()
                         if self.resizing_asset_panel:
                             self.resizing_asset_panel = False
@@ -7700,7 +8051,8 @@ class SceneEditorApp:
                         local = self._board_local_at(event.pos)
                         if self.drag_asset_path is not None:
                             if local is not None:
-                                self._place_new_sprite(self.drag_asset_path, local)
+                                if not self._place_saved_scene_asset(self.drag_asset_path, local):
+                                    self._place_new_sprite(self.drag_asset_path, local)
                         if self.duplicate_dragging:
                             self.duplicate_dragging = False
                             self.duplicate_drag_mode = False
@@ -7723,6 +8075,14 @@ class SceneEditorApp:
                 elif event.type == pygame.MOUSEMOTION:
                     if self._handle_canvas_motion(event.pos):
                         continue
+                    if self.native_drag_asset_rel is not None and self.native_drag_origin is not None:
+                        dx = event.pos[0] - self.native_drag_origin[0]
+                        dy = event.pos[1] - self.native_drag_origin[1]
+                        if (dx * dx + dy * dy) >= 64:
+                            rel_path = self.native_drag_asset_rel
+                            self._cancel_native_asset_drag()
+                            if self._start_native_asset_drag(rel_path):
+                                continue
                     if self.resizing_asset_panel:
                         self._resize_asset_panel(event.pos[1])
                     elif self.canvas_bottom_split_dragging and self.workspace_mode == "canvas" and not self.canvas_assets_open:
