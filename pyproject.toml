@@ -18,4 +18,5 @@ dependencies = [
 wilkos = "wilkos:main"
 
 [tool.setuptools]
-py-modules = ["app", "constants", "models", "wilkos"]
+py-modules = ["app", "constants", "media_cache", "models", "wilkos"]
+packages = ["browser", "canvas", "core", "history", "scene", "ui"]
