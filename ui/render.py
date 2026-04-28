@@ -1268,6 +1268,11 @@ class UIRenderMixin:
             pygame.draw.line(screen, (234, 234, 238), (cx + 3, cy - 3), (cx - 3, cy + 3), 1)
 
     def _draw_status(self, screen: pygame.Surface, small: pygame.font.Font) -> None:
+        # Hide status bar in canvas focus mode and when the animation panel is collapsed.
+        if self.workspace_mode == "canvas" and self.canvas_focus_mode:
+            return
+        if self.workspace_mode == "canvas" and self.canvas_bottom_collapsed:
+            return
         text = small.render(self.status[:170], True, (220, 220, 226))
         rect = pygame.Rect(self.board_rect.x + 8, self.board_rect.bottom - 30, self.board_rect.width - 16, 24)
         pygame.draw.rect(screen, (40, 40, 44), rect)
