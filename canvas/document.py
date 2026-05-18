@@ -255,6 +255,9 @@ class CanvasDocumentMixin:
         self._canvas_sel_preview_surf = None
         self._canvas_sel_rotate_cache_key = None
         self._canvas_sel_rotate_cache_surf = None
+        self._canvas_sel_3d_cache_key = None
+        self._canvas_sel_3d_cache_surf = None
+        self._canvas_sel_3d_cache_offset = (0.0, 0.0)
 
     def _canvas_patch_render_region(
         self,

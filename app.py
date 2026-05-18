@@ -412,14 +412,48 @@ class SceneEditorApp(
                             self.canvas_tool = "move"
                             self.status = "Move tool: drag to pan canvas."
                     elif self.workspace_mode == "canvas" and event.key == pygame.K_r and not cmd:
-                        if self.canvas_selection_pixels:
+                        # R single-press toggles 2D rotate. Pressing R again while
+                        # still in 2D rotate within ~400ms upgrades to 3D rotate.
+                        # Pressing R outside that window (or while in 3D rotate)
+                        # commits the rotation and returns to the selection state
+                        # with move/resize handles visible.
+                        now_ms = pygame.time.get_ticks()
+                        elapsed = now_ms - self.canvas_last_r_press_ms
+                        self.canvas_last_r_press_ms = now_ms
+
+                        def _ensure_selection_for_rotate() -> bool:
+                            if self.canvas_selection_pixels:
+                                return True
+                            if self.canvas_surface is None:
+                                return False
+                            pixel = self._canvas_pixel_at(self.drag_pos)
+                            if pixel is None or not self._canvas_select_opaque_region(pixel):
+                                self._canvas_select_all_opaque()
+                            return bool(self.canvas_selection_pixels)
+
+                        current_xform = self.canvas_sel_transform
+                        if current_xform == "rotate" and elapsed < 400:
+                            # Quick second R while in 2D rotate → upgrade to 3D rotate.
+                            # Cancel (don't commit) since the user is still mid-rotation.
+                            self._canvas_cancel_sel_transform()
+                            if _ensure_selection_for_rotate():
+                                self._canvas_enter_sel_transform("rotate3d")
+                            else:
+                                self.status = "Draw or select opaque pixels first."
+                        elif current_xform == "rotate":
+                            # Slow second R while in 2D rotate → commit, keep selection.
+                            self._canvas_commit_sel_transform()
+                            self.status = "2D rotate applied."
+                        elif current_xform == "rotate3d":
+                            # R while in 3D rotate → commit, keep selection.
+                            self._canvas_commit_sel_transform()
+                            self.status = "3D rotate applied."
+                        elif current_xform is not None:
+                            self.status = "Finish the current transform with Enter or Esc first."
+                        elif _ensure_selection_for_rotate():
                             self._canvas_enter_sel_transform("rotate")
-                        elif self.canvas_surface is not None:
-                            # No selection: rotate whole canvas 90° CW
-                            self._canvas_push_undo()
-                            self.canvas_surface = pygame.transform.rotate(self.canvas_surface, -90)
-                            self._mark_canvas_changed()
-                            self.status = "Canvas rotated 90° CW."
+                        else:
+                            self.status = "Draw or select opaque pixels first, then press R."
                     elif self.workspace_mode == "canvas" and event.key == pygame.K_s and not cmd:
                         if self.canvas_selection_pixels:
                             self._canvas_enter_sel_transform("scale")
@@ -522,12 +556,22 @@ class SceneEditorApp(
                                 self.dropdown_open = None
                                 self.status = "Moving canvas tools down."
                                 continue
-                        if not focus_canvas:
+                        scene_focus = self.workspace_mode == "scene" and self.scene_focus_mode
+                        if not focus_canvas and not scene_focus:
                             if self._handle_menu_click(event.pos):
                                 continue
                             if self._handle_tab_click(event.pos):
                                 continue
+                        if not focus_canvas:
                             if self._handle_asset_browser_click(event.pos):
+                                continue
+                        if self.workspace_mode == "scene":
+                            if self._scene_focus_toggle_rect().collidepoint(event.pos):
+                                self.scene_focus_mode = not self.scene_focus_mode
+                                self.dropdown_open = None
+                                self._update_layout(self.screen_width, self.screen_height)
+                                self._fit_active_scene()
+                                self.status = "Scene focus mode " + ("on." if self.scene_focus_mode else "off.")
                                 continue
                         if self._handle_canvas_click(event.pos):
                             continue
@@ -610,9 +654,12 @@ class SceneEditorApp(
                     elif self.workspace_mode == "canvas" and event.button in {2, 3}:
                         view = self._canvas_view_rect(self._canvas_workspace_panel_rect())
                         if view.collidepoint(event.pos):
-                            if self.canvas_selection_pixels:
-                                if self.canvas_sel_transform != "move" or not self.canvas_sel_lift:
-                                    self._canvas_enter_sel_transform("move", auto_commit=True)
+                            # Only treat right-click as "move via shortcut" when no
+                            # transform is in flight — otherwise entering a new move
+                            # would re-lift pixels that the active transform already
+                            # cleared from the canvas, wiping the selection.
+                            if self.canvas_selection_pixels and not self.canvas_sel_transform:
+                                self._canvas_enter_sel_transform("move", auto_commit=True)
                                 self.canvas_sel_drag_start = event.pos
                                 self.canvas_drawing = True
                             else:
@@ -660,7 +707,19 @@ class SceneEditorApp(
                             self.marquee_selecting = False
                         local = self._board_local_at(event.pos)
                         if self.drag_asset_path is not None:
-                            if local is not None:
+                            if self.workspace_mode == "canvas":
+                                # Only open the asset if the drag ends over the canvas view.
+                                view = self._canvas_view_rect(self._canvas_workspace_panel_rect())
+                                if view.collidepoint(event.pos) and self._canvas_editable(self.drag_asset_path):
+                                    self.canvas_doc.asset_rel = self.drag_asset_path
+                                    self.canvas_surface = None
+                                    self._sync_canvas_for_selection()
+                                    self.canvas_offset_x = 0.0
+                                    self.canvas_offset_y = 0.0
+                                    self._canvas_fit()
+                                    self._save_active_canvas_tab_state()
+                                    self.status = f"Loaded for editing: {self.drag_asset_path.rsplit('/', 1)[-1]}"
+                            elif local is not None:
                                 if not self._place_saved_scene_asset(self.drag_asset_path, local):
                                     self._place_new_sprite(self.drag_asset_path, local)
                         if self.duplicate_dragging:
@@ -773,7 +832,13 @@ class SceneEditorApp(
                                 zoom_delta = precise_y if abs(precise_y) > abs(precise_x) else precise_x
                                 self._canvas_zoom_at(self.drag_pos, 1 if zoom_delta > 0 else -1)
                             else:
-                                if self.canvas_selection_pixels:
+                                # Selection nudge only when there's a settled
+                                # selection (no transform in flight). During a
+                                # rotate/scale/paste, fall back to view pan so
+                                # we don't re-lift the (already cleared) pixels
+                                # and destroy the selection.
+                                in_transform = self.canvas_sel_transform is not None
+                                if self.canvas_selection_pixels and not in_transform:
                                     step_x = int(round(-precise_x * 8 / max(self.canvas_zoom, 0.001)))
                                     step_y = int(round(precise_y * 8 / max(self.canvas_zoom, 0.001)))
                                     if step_x == 0 and abs(precise_x) > 0.01:
@@ -821,7 +886,8 @@ class SceneEditorApp(
                 screen.fill((11, 16, 28))
 
             focus_canvas = self.workspace_mode == "canvas" and self.canvas_focus_mode
-            if not focus_canvas:
+            scene_focus = self.workspace_mode == "scene" and self.scene_focus_mode
+            if not focus_canvas and not scene_focus:
                 self._draw_topbar(screen, title_font, small)
                 self._draw_tabs(screen, small)
             if self.workspace_mode == "canvas":
@@ -835,6 +901,8 @@ class SceneEditorApp(
                 else:
                     hover_strip = pygame.Rect(self.screen_width - 8, self.screen_height // 2 - 48, 4, 96)
                     pygame.draw.rect(screen, (92, 112, 150), hover_strip)
+            elif scene_focus:
+                self._draw_asset_browser(screen, font, small)
             else:
                 self._draw_inspector(screen, font, small)
                 self._draw_asset_browser(screen, font, small)

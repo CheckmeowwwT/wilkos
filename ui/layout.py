@@ -224,6 +224,10 @@ class UILayoutMixin:
     def _canvas_focus_toggle_rect(self, panel: pygame.Rect) -> pygame.Rect:
         return pygame.Rect(panel.right - 34, panel.y + 8, 26, 26)
 
+    def _scene_focus_toggle_rect(self) -> pygame.Rect:
+        toolbar = self._scene_toolbar_rect()
+        return pygame.Rect(toolbar.right - 32, toolbar.y + 2, 26, 26)
+
     def _canvas_color_picker_layout(
         self,
     ) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect, pygame.Rect]:

@@ -11,7 +11,9 @@ class UIEventsMixin:
                 self.rotation_gizmo_enabled = False
                 if name == "canvas":
                     self.workspace_mode = "canvas"
+                    self.scene_focus_mode = False
                     self.dropdown_open = None
+                    self._update_layout(self.screen_width, self.screen_height)
                     self.status = "Canvas workspace."
                     self._sync_canvas_for_selection()
                 elif name == "assets":
@@ -23,6 +25,8 @@ class UIEventsMixin:
                 elif name == "scene":
                     self.workspace_mode = "scene"
                     self.dropdown_open = None if self.dropdown_open == name else name
+                    self._update_layout(self.screen_width, self.screen_height)
+                    self._fit_active_scene()
                 else:
                     self.dropdown_open = None if self.dropdown_open == name else name
                 return True
@@ -296,17 +300,13 @@ class UIEventsMixin:
             self._change_asset_dir(entry.path)
         else:
             if self.workspace_mode == "canvas":
-                if self._canvas_editable(entry.rel_path):
-                    self.canvas_doc.asset_rel = entry.rel_path
-                    self.canvas_surface = None
-                    self._sync_canvas_for_selection()
-                    self.canvas_offset_x = 0.0
-                    self.canvas_offset_y = 0.0
-                    self._canvas_fit()
-                    self._save_active_canvas_tab_state()
-                    self.status = f"Loaded for editing: {entry.name}"
-                else:
+                if not self._canvas_editable(entry.rel_path):
                     self.status = "Canvas mode supports PNG/JPG/BMP assets."
+                    return True
+                # Set up a drag so the asset only loads if dropped over the
+                # canvas view — bare clicks just select the thumbnail.
+                self.drag_asset_path = entry.rel_path
+                self.status = f"Dragging {entry.name}. Drop on the canvas to open it."
                 return True
             self.duplicate_drag_mode = False
             self.duplicate_dragging = False

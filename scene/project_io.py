@@ -241,9 +241,33 @@ class SceneProjectIOMixin:
         self._fit_active_scene()
         self.status = f"Opened project: {self.project_path.name}"
 
+    def _resolve_scene_save_basename(self, scene_name: str) -> str:
+        """Return a basename that won't overwrite an unrelated saved scene.
+
+        Same scene re-saved → reuse its existing basename.
+        Name collides with a different scene → suffix _2, _3, ... until free.
+        """
+        base = safe_scene_filename(scene_name)
+        self.scene_json_dir.mkdir(parents=True, exist_ok=True)
+        candidate = base
+        suffix = 2
+        while True:
+            json_path = self.scene_json_dir / f"{candidate}.json"
+            if not json_path.exists():
+                return candidate
+            try:
+                existing = json.loads(json_path.read_text(encoding="utf-8"))
+                existing_name = str(existing.get("name", "")) if isinstance(existing, dict) else ""
+            except (OSError, ValueError, json.JSONDecodeError):
+                existing_name = ""
+            if existing_name == scene_name:
+                return candidate
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+
     def _save_scene(self) -> None:
         scene = self.active_scene
-        safe_name = safe_scene_filename(scene.name)
+        safe_name = self._resolve_scene_save_basename(scene.name)
         path = self.scene_json_dir / f"{safe_name}.json"
         payload = {
             "name": scene.name,
@@ -315,23 +339,42 @@ class SceneProjectIOMixin:
             return True
 
         self._push_scene_undo()
-        offset_x = local_pos[0] - (loaded_scene.board_width / 2.0)
-        offset_y = local_pos[1] - (loaded_scene.board_height / 2.0)
+
+        src_min_x = min(s.x for s in loaded_scene.sprites)
+        src_min_y = min(s.y for s in loaded_scene.sprites)
+        src_max_x = max(s.x + s.width for s in loaded_scene.sprites)
+        src_max_y = max(s.y + s.height for s in loaded_scene.sprites)
+        src_w = max(1.0, src_max_x - src_min_x)
+        src_h = max(1.0, src_max_y - src_min_y)
+
+        active = self.active_scene
+        scale = min(1.0, active.board_width / src_w, active.board_height / src_h)
+        target_w = src_w * scale
+        target_h = src_h * scale
+
+        desired_left = local_pos[0] - target_w / 2.0
+        desired_top = local_pos[1] - target_h / 2.0
+        final_left = max(0.0, min(desired_left, active.board_width - target_w))
+        final_top = max(0.0, min(desired_top, active.board_height - target_h))
+
         new_ids: set[int] = set()
         for source in loaded_scene.sprites:
+            rel_x = (source.x - src_min_x) * scale
+            rel_y = (source.y - src_min_y) * scale
+            new_w = max(8, int(round(source.width * scale)))
+            new_h = max(8, int(round(source.height * scale)))
             sprite = SpritePlacement(
                 sprite_id=self.next_sprite_id,
                 asset_path=source.asset_path,
-                x=source.x + offset_x,
-                y=source.y + offset_y,
-                width=source.width,
-                height=source.height,
+                x=final_left + rel_x,
+                y=final_top + rel_y,
+                width=new_w,
+                height=new_h,
                 rotation_x=source.rotation_x,
                 rotation_y=source.rotation_y,
                 rotation_z=source.rotation_z,
             )
             self.next_sprite_id += 1
-            self._clamp_sprite_to_scene(sprite)
             self.active_scene.sprites.append(sprite)
             new_ids.add(sprite.sprite_id)
         self._set_selection(new_ids)

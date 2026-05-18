@@ -54,6 +54,9 @@ class CoreAppMixin:
         self.canvas_inspector_resize_left: bool = False
         self.canvas_inspector_resize_top: bool = False
         self.canvas_focus_mode: bool = False
+        self.scene_focus_mode: bool = False
+        self.canvas_light_mode: str = "bulb"
+        self.canvas_last_r_press_ms: int = -10000
         self.canvas_focus_layer_width: int = 260
         self.canvas_focus_tools_open: bool = False
         self.canvas_focus_tools_progress: float = 0.0
@@ -170,6 +173,13 @@ class CoreAppMixin:
         self.canvas_sel_surface: pygame.Surface | None = None
         self.canvas_sel_base_bbox: tuple[int, int, int, int] | None = None
         self.canvas_sel_scale_rect: tuple[float, float, float, float] | None = None
+        self.canvas_sel_3d_x: float = 0.0
+        self.canvas_sel_3d_y: float = 0.0
+        self.canvas_sel_3d_z: float = 0.0
+        self.canvas_sel_3d_axis: str | None = None
+        self.canvas_sel_3d_start_angle: float = 0.0
+        self.canvas_sel_3d_last_angle: float = 0.0
+        self.canvas_sel_3d_start_values: tuple[float, float, float] = (0.0, 0.0, 0.0)
         # Canvas resize-tool drag state
         self.canvas_resize_dragging: bool = False
         self.canvas_resize_anchor: str = ""  # "br" etc.
@@ -179,6 +189,8 @@ class CoreAppMixin:
         # Cached checkerboard surface (keyed by (cw, ch, tile, bg_light))
         self._canvas_checker_cache: tuple | None = None
         self._canvas_checker_surf: pygame.Surface | None = None
+        self._canvas_checker_base_key: tuple | None = None
+        self._canvas_checker_base: pygame.Surface | None = None
         self._canvas_grid_cache: tuple | None = None
         self._canvas_grid_surf: pygame.Surface | None = None
         self._canvas_line_preview_cache_key: tuple | None = None
@@ -187,6 +199,10 @@ class CoreAppMixin:
         self._canvas_sel_preview_surf: pygame.Surface | None = None
         self._canvas_sel_rotate_cache_key: tuple | None = None
         self._canvas_sel_rotate_cache_surf: pygame.Surface | None = None
+        self._canvas_sel_3d_cache_key: tuple | None = None
+        self._canvas_sel_3d_cache_surf: pygame.Surface | None = None
+        self._canvas_sel_3d_cache_offset: tuple[float, float] = (0.0, 0.0)
+        self.canvas_sprite_model: dict | None = None
         self._init_canvas_tabs()
         self.selected_sprite_id: int | None = None
         self.selected_sprite_ids: set[int] = set()
@@ -260,19 +276,29 @@ class CoreAppMixin:
         default_asset_h = max(220, min(340, self.screen_height // 3))
         self.asset_h = self._clamp_asset_height(self.asset_h if preserve_asset_h else default_asset_h)
         asset_rect = self._asset_panel_rect()
-        main_top = self.topbar_h + self.tabs_h + self.gutter
+        mode = getattr(self, "workspace_mode", "scene")
+        scene_focus = mode == "scene" and getattr(self, "scene_focus_mode", False)
+        if scene_focus:
+            main_top = self.gutter
+        else:
+            main_top = self.topbar_h + self.tabs_h + self.gutter
         main_bottom = asset_rect.y - self.gutter
         main_height = max(220, main_bottom - main_top)
-        mode = getattr(self, "workspace_mode", "scene")
         if mode == "canvas":
             inspector_width = max(220, min(self.canvas_inspector_width, self.screen_width - 420))
             self.canvas_inspector_width = inspector_width
+        elif scene_focus:
+            inspector_width = 0
         else:
             inspector_width = max(220, min(300, self.screen_width // 5))
+        if scene_focus:
+            board_width = self.screen_width - self.gutter * 2
+        else:
+            board_width = self.screen_width - inspector_width - self.gutter * 3
         self.board_rect = pygame.Rect(
             self.gutter,
             main_top,
-            self.screen_width - inspector_width - self.gutter * 3,
+            board_width,
             main_height,
         )
 

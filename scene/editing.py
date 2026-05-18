@@ -354,6 +354,18 @@ class SceneEditingMixin:
         if push_undo:
             self._push_scene_undo()
         width, height = native_size
+        # Fit-scale preserving aspect ratio when the asset is bigger than the scene,
+        # so dropping a 1024x768 asset onto a 256x256 scene yields a centered
+        # 256x192 sprite instead of a stretched 256x256 fill.
+        active = self.active_scene
+        scale = min(
+            1.0,
+            active.board_width / max(1, width),
+            active.board_height / max(1, height),
+        )
+        if scale < 1.0:
+            width = max(8, int(round(width * scale)))
+            height = max(8, int(round(height * scale)))
         x = local_pos[0] - width / 2
         y = local_pos[1] - height / 2
         sprite = SpritePlacement(
@@ -373,7 +385,7 @@ class SceneEditingMixin:
         if select:
             self._set_selection({sprite.sprite_id}, primary=sprite.sprite_id)
         if report_status:
-            self.status = f"Placed {Path(asset_path).name} at its native size ({width}x{height})."
+            self.status = f"Placed {Path(asset_path).name} ({width}x{height})."
         return True
 
     def _arm_duplicate_drag_mode(self) -> None:

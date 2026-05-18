@@ -16,8 +16,7 @@ except ImportError:
 
 
 class UIRenderMixin:
-    @staticmethod
-    def _draw_tool_icon(surf: pygame.Surface, name: str, rect: pygame.Rect, col: tuple) -> None:
+    def _draw_tool_icon(self, surf: pygame.Surface, name: str, rect: pygame.Rect, col: tuple) -> None:
         """Draw a small programmatic icon so we're not font-glyph-dependent."""
         cx, cy = rect.centerx, rect.centery
         s = 5  # half-size
@@ -111,6 +110,46 @@ class UIRenderMixin:
             pygame.draw.line(surf, c, (cx, cy), (cx + s, cy + s), 1)
             pygame.draw.line(surf, c, (cx, cy), (cx, cy - s), 1)
 
+        elif name == "rotate3d":
+            # Three tiny rotation rings.
+            pygame.draw.ellipse(surf, c, pygame.Rect(cx - s, cy - s, s * 2, s * 2), 1)
+            pygame.draw.ellipse(surf, c, pygame.Rect(cx - s, cy - 3, s * 2, 6), 1)
+            pygame.draw.ellipse(surf, c, pygame.Rect(cx - 3, cy - s, 6, s * 2), 1)
+
+        elif name == "light":
+            mode = getattr(self, "canvas_light_mode", "bulb")
+            if mode == "fire":
+                # Flame torch: teardrop body with inner flame highlight.
+                outer = [
+                    (cx, cy - s - 1),
+                    (cx - 3, cy - s + 3),
+                    (cx - s, cy),
+                    (cx - 3, cy + s - 1),
+                    (cx, cy + s),
+                    (cx + 3, cy + s - 1),
+                    (cx + s, cy),
+                    (cx + 3, cy - s + 3),
+                ]
+                pygame.draw.polygon(surf, c, outer, 1)
+                inner = [
+                    (cx, cy - s + 3),
+                    (cx - 2, cy + 1),
+                    (cx, cy + s - 2),
+                    (cx + 2, cy + 1),
+                ]
+                pygame.draw.polygon(surf, c, inner, 1)
+            else:
+                # Light bulb: round glass top + screw base lines + radiating ticks.
+                pygame.draw.circle(surf, c, (cx, cy - 1), s - 1, 1)
+                pygame.draw.line(surf, c, (cx - 2, cy + s - 2), (cx + 2, cy + s - 2), 1)
+                pygame.draw.line(surf, c, (cx - 2, cy + s),     (cx + 2, cy + s),     1)
+                for ang in (0.0, math.pi / 2, math.pi, 3 * math.pi / 2):
+                    ex = int(cx + math.cos(ang) * (s + 2))
+                    ey = int(cy - 1 + math.sin(ang) * (s + 2))
+                    ix = int(cx + math.cos(ang) * (s + 0))
+                    iy = int(cy - 1 + math.sin(ang) * (s + 0))
+                    pygame.draw.line(surf, c, (ix, iy), (ex, ey), 1)
+
         else:
             # Fallback: render short text
             pass  # caller can fall back to text
@@ -194,6 +233,25 @@ class UIRenderMixin:
         pygame.draw.ellipse(screen, colors["y"], ring_rect_y, widths["y"])
         pygame.draw.circle(screen, (232, 232, 236), (cx, cy), 3)
 
+    def _draw_canvas_3d_rotation_gizmo(self, screen: pygame.Surface, draw_rect: pygame.Rect) -> None:
+        center = self._canvas_3d_gizmo_center_screen(draw_rect)
+        metrics = self._canvas_3d_gizmo_metrics(draw_rect)
+        if center is None or metrics is None:
+            return
+        cx, cy = int(center[0]), int(center[1])
+        radius, x_ry, y_rx = metrics
+        ring_rect_z = pygame.Rect(int(cx - radius), int(cy - radius), int(radius * 2), int(radius * 2))
+        ring_rect_x = pygame.Rect(int(cx - radius), int(cy - x_ry), int(radius * 2), int(x_ry * 2))
+        ring_rect_y = pygame.Rect(int(cx - y_rx), int(cy - radius), int(y_rx * 2), int(radius * 2))
+        colors = {"x": (236, 96, 96), "y": (94, 208, 118), "z": (232, 232, 238)}
+        widths = {"x": 1, "y": 1, "z": 1}
+        if self.canvas_sel_3d_axis in widths:
+            widths[self.canvas_sel_3d_axis] = 2
+        pygame.draw.ellipse(screen, colors["z"], ring_rect_z, widths["z"])
+        pygame.draw.ellipse(screen, colors["x"], ring_rect_x, widths["x"])
+        pygame.draw.ellipse(screen, colors["y"], ring_rect_y, widths["y"])
+        pygame.draw.circle(screen, (246, 246, 250), (cx, cy), 3)
+
     def _draw_scene_board(self, screen: pygame.Surface, font: pygame.font.Font, small: pygame.font.Font) -> None:
         self._draw_shadowed_panel(screen, self.board_rect, (30, 30, 34), (84, 84, 90), radius=0)
         toolbar = self._scene_toolbar_rect()
@@ -205,7 +263,14 @@ class UIRenderMixin:
         zoom_text = f"Zoom {int(self.zoom * 100)}%"
         screen.blit(font.render(title, True, (236, 236, 240)), (toolbar.x + 8, toolbar.y + 6))
         screen.blit(small.render(meta, True, (180, 180, 186)), (toolbar.x + 132, toolbar.y + 9))
-        screen.blit(small.render(zoom_text, True, (180, 180, 186)), (toolbar.right - 90, toolbar.y + 9))
+        screen.blit(small.render(zoom_text, True, (180, 180, 186)), (toolbar.right - 130, toolbar.y + 9))
+
+        focus_rect = self._scene_focus_toggle_rect()
+        active = self.scene_focus_mode
+        pygame.draw.rect(screen, (50, 80, 130) if active else (40, 40, 48), focus_rect)
+        pygame.draw.rect(screen, (100, 150, 220) if active else (72, 72, 82), focus_rect, 1)
+        inner = focus_rect.inflate(-10, -10)
+        pygame.draw.rect(screen, (220, 230, 242) if active else (170, 170, 180), inner, 1)
 
         self._clamp_camera()
         _, origin_x, origin_y = self._scene_world_origin_on_screen()
@@ -355,9 +420,31 @@ class UIRenderMixin:
         visible_patch = self._canvas_visible_source_dest_rects(draw_rect, view, (sw, sh))
         visible_px_bounds = self._canvas_visible_pixel_bounds(draw_rect, view, (sw, sh))
 
-        # ── Background: cache a checkerboard that matches the exact draw size ──
+        # ── Background: build a checker at canvas resolution once, scale per frame ──
         if visible_patch is not None:
             src_rect, dst_rect = visible_patch
+            base_key = (sw, sh, self.canvas_bg_light)
+            if self._canvas_checker_base_key != base_key:
+                if self.canvas_bg_light:
+                    ca, cb = (255, 255, 255), (210, 210, 215)
+                else:
+                    ca, cb = (68, 68, 72), (48, 48, 52)
+                base = pygame.Surface((sw, sh))
+                base.fill(ca)
+                row_even = pygame.Surface((sw, 1))
+                row_even.fill(ca)
+                for x in range(1, sw, 2):
+                    row_even.fill(cb, (x, 0, 1, 1))
+                row_odd = pygame.Surface((sw, 1))
+                row_odd.fill(ca)
+                for x in range(0, sw, 2):
+                    row_odd.fill(cb, (x, 0, 1, 1))
+                for y in range(sh):
+                    base.blit(row_odd if (y % 2) else row_even, (0, y))
+                self._canvas_checker_base = base
+                self._canvas_checker_base_key = base_key
+                self._canvas_checker_cache = None
+                self._canvas_checker_surf = None
             cache_key = (
                 sw,
                 sh,
@@ -369,30 +456,11 @@ class UIRenderMixin:
                 dst_rect.height,
                 self.canvas_bg_light,
             )
-            if self._canvas_checker_cache != cache_key:
-                if self.canvas_bg_light:
-                    ca, cb = (255, 255, 255), (210, 210, 215)
-                else:
-                    ca, cb = (68, 68, 72), (48, 48, 52)
-                checker = pygame.Surface((dst_rect.width, dst_rect.height))
-                checker.fill(ca)
-                row_start = src_rect.y
-                row_end = src_rect.bottom
-                col_start = src_rect.x
-                col_end = src_rect.right
-                for row in range(row_start, row_end):
-                    y0 = int(round((row - src_rect.y) * dst_rect.height / src_rect.height))
-                    y1 = int(round((row + 1 - src_rect.y) * dst_rect.height / src_rect.height))
-                    if y1 <= y0:
-                        continue
-                    for col in range(col_start, col_end):
-                        if (row + col) % 2 == 1:
-                            x0 = int(round((col - src_rect.x) * dst_rect.width / src_rect.width))
-                            x1 = int(round((col + 1 - src_rect.x) * dst_rect.width / src_rect.width))
-                            if x1 <= x0:
-                                continue
-                            checker.fill(cb, (x0, y0, x1 - x0, y1 - y0))
-                self._canvas_checker_surf = checker
+            if self._canvas_checker_cache != cache_key and self._canvas_checker_base is not None:
+                patch = self._canvas_checker_base.subsurface(src_rect)
+                self._canvas_checker_surf = pygame.transform.scale(
+                    patch, (dst_rect.width, dst_rect.height)
+                )
                 self._canvas_checker_cache = cache_key
             if self._canvas_checker_surf is not None:
                 screen.blit(self._canvas_checker_surf, dst_rect.topleft)
@@ -605,6 +673,21 @@ class UIRenderMixin:
                         center_y = draw_rect.y + int(round(((min_y + max_y + 1) / 2.0) * zoom))
                         preview_rect = rotated.get_rect(center=(center_x, center_y))
                         screen.blit(rotated, preview_rect.topleft)
+                elif self.canvas_sel_transform == "rotate3d" and self.canvas_sel_base_bbox is not None:
+                    projected = self._canvas_3d_selection_preview()
+                    if projected is not None:
+                        projected_surface, offset = projected
+                        min_x, min_y, max_x, max_y = self.canvas_sel_base_bbox
+                        center_x = (min_x + max_x + 1) / 2.0
+                        center_y = (min_y + max_y + 1) / 2.0
+                        preview_rect = pygame.Rect(
+                            draw_rect.x + int(round((center_x + offset[0]) * zoom)),
+                            draw_rect.y + int(round((center_y + offset[1]) * zoom)),
+                            max(1, int(round(projected_surface.get_width() * zoom))),
+                            max(1, int(round(projected_surface.get_height() * zoom))),
+                        )
+                        preview = pygame.transform.scale(projected_surface, preview_rect.size)
+                        screen.blit(preview, preview_rect.topleft)
                 else:
                     for (px, py), col in self.canvas_sel_lift.items():
                         bbox = self._canvas_sel_bbox()
@@ -657,6 +740,11 @@ class UIRenderMixin:
                             pygame.draw.line(screen, (100, 255, 180), (rotate_box.centerx, rotate_box.top), handle_rect.center, 1)
                             pygame.draw.ellipse(screen, (248, 248, 250), handle_rect)
                             pygame.draw.ellipse(screen, (40, 80, 56), handle_rect, 2)
+                elif self.canvas_sel_transform == "rotate3d":
+                    rotate3d_box = self._canvas_3d_selection_screen_rect(draw_rect)
+                    if rotate3d_box is not None:
+                        pygame.draw.rect(screen, (135, 220, 255), rotate3d_box, 2)
+                    self._draw_canvas_3d_rotation_gizmo(screen, draw_rect)
         # ── Resize-tool handles ─────────────────────────────────────
         if self.canvas_tool == "resize" and self.canvas_surface is not None:
             panel2 = self._canvas_workspace_panel_rect()
