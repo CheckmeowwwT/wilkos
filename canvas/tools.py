@@ -60,6 +60,7 @@ class CanvasToolsMixin:
         ("smudge",     "Smudge"),
         ("vpoint",     "VP"),
         ("light",      "Light"),
+        ("colorkey",   "Color Key"),
     ]
 
     # Unicode icons rendered in tool buttons (1-2 chars each)
@@ -191,6 +192,12 @@ class CanvasToolsMixin:
         surf: pygame.Surface,
         top_left: tuple[int, int],
     ) -> set[tuple[int, int]]:
+        """Write `surf`'s opaque pixels onto the canvas at `top_left`.
+
+        Transparent pixels in the selection surface are ignored, so rectangular
+        selections can be moved over existing art without punching out the
+        unpainted parts of the rectangle.
+        """
         if self.canvas_surface is None:
             return set()
         sw, sh = self.canvas_surface.get_size()
@@ -203,10 +210,25 @@ class CanvasToolsMixin:
                     continue
                 tx = ox + sx
                 ty = oy + sy
-                if 0 <= tx < sw and 0 <= ty < sh:
-                    self.canvas_surface.set_at((tx, ty), color)
-                    selected.add((tx, ty))
+                if not (0 <= tx < sw and 0 <= ty < sh):
+                    continue
+                self.canvas_surface.set_at((tx, ty), color)
+                selected.add((tx, ty))
         return selected
+
+    def _canvas_restore_transform_base(self) -> None:
+        """Reset the active layer to the transform start, then cut the source."""
+        if self.canvas_surface is None or not self.canvas_sel_restore_on_cancel:
+            return
+        source = getattr(self, "canvas_sel_source_surface", None)
+        if source is not None:
+            self.canvas_surface = source.copy()
+        if self.canvas_surface is None:
+            return
+        sw, sh = self.canvas_surface.get_size()
+        for px, py in self.canvas_sel_lift.keys():
+            if 0 <= px < sw and 0 <= py < sh:
+                self.canvas_surface.set_at((px, py), (0, 0, 0, 0))
 
     def _canvas_move_selection_immediate(self, dx: int, dy: int) -> bool:
         if self.canvas_surface is None or not self.canvas_selection_pixels or (dx == 0 and dy == 0):
@@ -222,8 +244,7 @@ class CanvasToolsMixin:
         else:
             self._canvas_enter_sel_transform("move", auto_commit=False)
             self.canvas_sel_offset = (dx, dy)
-        self._canvas_commit_sel_transform()
-        self.status = "Selection moved."
+        self.status = "Selection moved — Enter/click outside to commit, Esc to cancel."
         return True
 
     def _canvas_draw_rect(self, view: pygame.Rect, surface: pygame.Surface) -> pygame.Rect:
@@ -1537,19 +1558,40 @@ class CanvasToolsMixin:
         self.status = f"Selected {len(self.canvas_selection_pixels)} pixel(s)."
 
     def _canvas_enter_sel_transform(self, mode: str, *, auto_commit: bool = False) -> None:
-        """Lift the selection pixels off the canvas and enter a transform mode."""
+        """Lift the selection pixels off the canvas and enter a transform mode.
+
+        For move/scale we keep the original pixels visible on the canvas during
+        the drag preview (no destructive erase yet). The originals are wiped
+        only at commit-time, so dragging over other art doesn't visually
+        destroy anything until the user actually confirms.
+        """
         if not self.canvas_selection_pixels or self.canvas_surface is None:
             return
-        self._canvas_push_undo()
-        # Snapshot selected pixel colors and erase them from canvas
-        self.canvas_sel_lift = {}
+        selected_samples: dict[tuple[int, int], tuple[int, int, int, int]] = {}
         for px, py in self.canvas_selection_pixels:
             try:
                 col = self.canvas_surface.get_at((px, py))
-                self.canvas_sel_lift[(px, py)] = (col.r, col.g, col.b, col.a)
-                self.canvas_surface.set_at((px, py), (0, 0, 0, 0))
             except IndexError:
-                pass
+                continue
+            selected_samples[(px, py)] = (col.r, col.g, col.b, col.a)
+        lifted: dict[tuple[int, int], tuple[int, int, int, int]] = {}
+        for pos, color in selected_samples.items():
+            if color[3] <= 0:
+                continue
+            lifted[pos] = color
+        if not lifted:
+            self.canvas_sel_transform = None
+            self.status = "Selection has no opaque pixels to transform."
+            return
+        self._canvas_push_undo()
+        self.canvas_sel_lift = lifted
+        self.canvas_sel_source_surface = self.canvas_surface.copy()
+        # Erase only for transforms that need the canvas cleared during preview
+        # (rotate/rotate3d render the source separately).
+        clear_originals_now = mode not in ("move", "scale")
+        if clear_originals_now:
+            for px, py in self.canvas_sel_lift:
+                self.canvas_surface.set_at((px, py), (0, 0, 0, 0))
         self.canvas_sel_transform = mode
         self.canvas_sel_offset = (0, 0)
         self.canvas_sel_angle = 0.0
@@ -1627,6 +1669,7 @@ class CanvasToolsMixin:
         self.canvas_sel_restore_on_cancel = False
         self.canvas_sel_auto_commit = False
         self.canvas_sel_push_undo_on_commit = True
+        self.canvas_sel_source_surface = None
         self._canvas_rebuild_selection_surface()
         self.status = "Pasted selection — drag to position, Enter to commit, Esc to cancel."
 
@@ -1638,6 +1681,10 @@ class CanvasToolsMixin:
         if self.canvas_sel_push_undo_on_commit:
             self._canvas_push_undo()
         if self.canvas_sel_transform == "move" and self.canvas_sel_surface is not None and self.canvas_sel_base_bbox is not None:
+            # Rebuild from the transform-start snapshot, then cut the original
+            # pixels. This keeps square-select moves from accumulating preview
+            # damage or erasing art they pass over.
+            self._canvas_restore_transform_base()
             min_x, min_y, _, _ = self.canvas_sel_base_bbox
             ox, oy = self.canvas_sel_offset
             surf_to_apply = self.canvas_sel_surface
@@ -1676,6 +1723,7 @@ class CanvasToolsMixin:
                     "pixels": model_pixels,
                 }
         elif self.canvas_sel_transform == "scale" and self.canvas_sel_surface is not None and self.canvas_sel_scale_rect is not None:
+            self._canvas_restore_transform_base()
             left, top, right, bottom = self.canvas_sel_scale_rect
             target_w = max(1, int(round(right - left)))
             target_h = max(1, int(round(bottom - top)))
@@ -1686,6 +1734,7 @@ class CanvasToolsMixin:
             )
             self._canvas_invalidate_sprite_model()
         elif self.canvas_sel_transform == "rotate" and self.canvas_sel_surface is not None and self.canvas_sel_base_bbox is not None:
+            self._canvas_restore_transform_base()
             rotated = self._canvas_rotated_selection_preview(self.canvas_sel_angle)
             if rotated is not None:
                 min_x, min_y, max_x, max_y = self.canvas_sel_base_bbox
@@ -1698,6 +1747,7 @@ class CanvasToolsMixin:
                 self.canvas_selection_pixels = self._canvas_apply_surface_selection(rotated, top_left)
             self._canvas_invalidate_sprite_model()
         elif self.canvas_sel_transform == "rotate3d" and self.canvas_sel_surface is not None and self.canvas_sel_base_bbox is not None:
+            self._canvas_restore_transform_base()
             min_x, min_y, max_x, max_y = self.canvas_sel_base_bbox
             original_surface = self.canvas_sel_surface
             origin_min = (int(min_x), int(min_y))
@@ -1737,6 +1787,7 @@ class CanvasToolsMixin:
         self.canvas_sel_auto_commit = False
         self.canvas_sel_push_undo_on_commit = False
         self.canvas_sel_surface = None
+        self.canvas_sel_source_surface = None
         self.canvas_sel_base_bbox = None
         self.canvas_sel_scale_rect = None
         self._canvas_sel_preview_cache_key = None
@@ -1749,7 +1800,10 @@ class CanvasToolsMixin:
 
     def _canvas_cancel_sel_transform(self) -> None:
         """Paint lifted pixels back at original position (cancel transform)."""
-        if self.canvas_surface is not None and self.canvas_sel_restore_on_cancel:
+        source = getattr(self, "canvas_sel_source_surface", None)
+        if self.canvas_sel_restore_on_cancel and source is not None:
+            self.canvas_surface = source.copy()
+        elif self.canvas_surface is not None and self.canvas_sel_restore_on_cancel:
             sw, sh = self.canvas_surface.get_size()
             for (px, py), col in self.canvas_sel_lift.items():
                 if 0 <= px < sw and 0 <= py < sh:
@@ -1768,6 +1822,7 @@ class CanvasToolsMixin:
         self.canvas_sel_auto_commit = False
         self.canvas_sel_push_undo_on_commit = False
         self.canvas_sel_surface = None
+        self.canvas_sel_source_surface = None
         self.canvas_sel_base_bbox = None
         self.canvas_sel_scale_rect = None
         self._canvas_sel_preview_cache_key = None
@@ -2130,6 +2185,53 @@ class CanvasToolsMixin:
         self.canvas_surface.blit(buffer, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
 
     @staticmethod
+    def _parse_colorkey_input(raw: str) -> tuple[int, int, int] | None:
+        """Parse 'r,g,b' / 'r g b' / 'r-g-b' strings into a (0-255, 0-255, 0-255) tuple."""
+        if not raw:
+            return None
+        cleaned = raw.replace(" ", ",").replace("-", ",").replace(";", ",")
+        parts = [p for p in cleaned.split(",") if p.strip() != ""]
+        if len(parts) != 3:
+            return None
+        try:
+            values = tuple(int(p.strip()) for p in parts)
+        except ValueError:
+            return None
+        r, g, b = values
+        if not (0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255):
+            return None
+        return r, g, b
+
+    def _canvas_apply_colorkey_removal(self) -> bool:
+        """Erase every pixel on the active layer whose RGB matches the input field."""
+        if self.canvas_surface is None:
+            self.status = "Open a canvas first."
+            return False
+        target = self._parse_colorkey_input(self.canvas_colorkey_input)
+        if target is None:
+            self.status = "Color key needs R,G,B values 0-255 (e.g. 255,255,255)."
+            return False
+        tr, tg, tb = target
+        sw, sh = self.canvas_surface.get_size()
+        self._canvas_push_undo()
+        removed = 0
+        for py in range(sh):
+            for px in range(sw):
+                pixel = self.canvas_surface.get_at((px, py))
+                if pixel.a == 0:
+                    continue
+                if pixel.r == tr and pixel.g == tg and pixel.b == tb:
+                    self.canvas_surface.set_at((px, py), (0, 0, 0, 0))
+                    removed += 1
+        self._mark_canvas_changed()
+        self.status = (
+            f"Removed {removed} pixel(s) matching {tr},{tg},{tb}."
+            if removed
+            else f"No pixels matched {tr},{tg},{tb}."
+        )
+        return True
+
+    @staticmethod
     def _fire_palette_from_color(
         color: tuple[int, int, int, int],
     ) -> tuple[
@@ -2426,6 +2528,13 @@ class CanvasToolsMixin:
             if bf.collidepoint(pos):
                 self.canvas_blend_focus = True
                 self.canvas_brush_size_focus = False
+                self.canvas_colorkey_focus = False
+                return True
+            ck_rect = self._canvas_colorkey_input_rect(panel)
+            if ck_rect.collidepoint(pos):
+                self.canvas_colorkey_focus = True
+                self.canvas_brush_size_focus = False
+                self.canvas_blend_focus = False
                 return True
             for key, rect in self._canvas_selection_action_rects(panel).items():
                 if rect.collidepoint(pos):
@@ -2448,6 +2557,7 @@ class CanvasToolsMixin:
                     return True
             self.canvas_brush_size_focus = False
             self.canvas_blend_focus = False
+            self.canvas_colorkey_focus = False
             for idx, swatch_rect in enumerate(self._canvas_quick_palette_rects(panel)):
                 if swatch_rect.collidepoint(pos):
                     self._canvas_apply_quick_palette_slot(idx)
@@ -2460,6 +2570,7 @@ class CanvasToolsMixin:
         if not board.collidepoint(pos):
             self.canvas_brush_size_focus = False
             self.canvas_blend_focus = False
+            self.canvas_colorkey_focus = False
             return False
 
         # ── In-canvas toolbar (New / Save / Fit / Onion / BG) ─────────
@@ -2514,7 +2625,7 @@ class CanvasToolsMixin:
                 elif key == "paste":
                     self._canvas_paste_start()
                 elif key == "move" and self.canvas_selection_pixels:
-                    self._canvas_enter_sel_transform("move", auto_commit=True)
+                    self._canvas_enter_sel_transform("move", auto_commit=False)
                 return True
 
         if self.canvas_sel_transform == "rotate3d" and self.canvas_selection_pixels:
@@ -2548,7 +2659,9 @@ class CanvasToolsMixin:
         for handle_name, handle_rect in handle_rects.items():
             if handle_rect.collidepoint(pos) and self.canvas_selection_pixels:
                 if self.canvas_sel_transform != "scale" or not self.canvas_sel_lift:
-                    self._canvas_enter_sel_transform("scale", auto_commit=True)
+                    # Preview-only scale: same semantics as move — no canvas
+                    # writes until Enter or a click outside the selection.
+                    self._canvas_enter_sel_transform("scale", auto_commit=False)
                 self.canvas_sel_drag_start = pos
                 self.canvas_sel_drag_mode = handle_name
                 self.canvas_drawing = True
@@ -2557,8 +2670,22 @@ class CanvasToolsMixin:
         sel_rect = self._canvas_selection_screen_rect(draw_rect)
         if sel_rect is not None and sel_rect.collidepoint(pos) and self.canvas_selection_pixels:
             if self.canvas_sel_transform != "move" or not self.canvas_sel_lift:
-                self._canvas_enter_sel_transform("move", auto_commit=True)
-            self.canvas_sel_drag_start = pos
+                # Preview-only move: pixels stay lifted until the user explicitly
+                # commits with Enter / a click outside the selection. This keeps
+                # the dragged content from overwriting whatever it passes over,
+                # and collapses the whole move into a single undo step.
+                self._canvas_enter_sel_transform("move", auto_commit=False)
+                self.canvas_sel_drag_start = pos
+            else:
+                # Continuing an existing move-preview: shift drag_start by the
+                # current offset (in screen pixels) so the motion delta adds to
+                # the accumulated offset instead of resetting it.
+                ox, oy = self.canvas_sel_offset
+                zoom = max(self.canvas_zoom, 0.001)
+                self.canvas_sel_drag_start = (
+                    pos[0] - int(round(ox * zoom)),
+                    pos[1] - int(round(oy * zoom)),
+                )
             self.canvas_drawing = True
             return True
 
@@ -2567,10 +2694,10 @@ class CanvasToolsMixin:
             self._canvas_paste_commit()
             return True
 
-        # Click outside the paste/move selection while a non-auto-committing
-        # paste is live → commit so the user doesn't have to find the Enter key.
+        # Click outside a non-auto-committing move/scale/paste → commit it
+        # so the user doesn't have to find the Enter key.
         if (
-            self.canvas_sel_transform == "move"
+            self.canvas_sel_transform in ("move", "scale")
             and self.canvas_sel_lift
             and not self.canvas_sel_auto_commit
         ):
@@ -2621,6 +2748,19 @@ class CanvasToolsMixin:
                 sampled = self.canvas_surface.get_at(pixel)
                 self._set_canvas_color((sampled.r, sampled.g, sampled.b, 255))
                 self.status = f"Picked {self._canvas_color_hex()}."
+        elif tool == "colorkey":
+            # Click samples the pixel's RGB into the input. Hit Enter to wipe matches.
+            if pixel and self.canvas_surface is not None:
+                sampled = self.canvas_surface.get_at(pixel)
+                if sampled.a == 0:
+                    self.status = "That pixel is transparent — pick an opaque one."
+                else:
+                    self.canvas_colorkey_input = f"{sampled.r},{sampled.g},{sampled.b}"
+                    self.canvas_colorkey_focus = False
+                    self.status = (
+                        f"Color Key target: {sampled.r},{sampled.g},{sampled.b}. "
+                        "Press Enter to remove all matching pixels."
+                    )
         elif tool == "bucket":
             if pixel:
                 self._record_canvas_color_use(self.canvas_color, weight=2)
@@ -2673,8 +2813,16 @@ class CanvasToolsMixin:
         elif tool == "move":
             if self.canvas_selection_pixels:
                 if self.canvas_sel_transform != "move" or not self.canvas_sel_lift:
-                    self._canvas_enter_sel_transform("move", auto_commit=True)
-                self.canvas_sel_drag_start = pos
+                    self._canvas_enter_sel_transform("move", auto_commit=False)
+                    self.canvas_sel_drag_start = pos
+                else:
+                    # Continue an existing move-preview without resetting the offset.
+                    ox, oy = self.canvas_sel_offset
+                    zoom = max(self.canvas_zoom, 0.001)
+                    self.canvas_sel_drag_start = (
+                        pos[0] - int(round(ox * zoom)),
+                        pos[1] - int(round(oy * zoom)),
+                    )
                 self.canvas_drawing = True
             else:
                 # Move tool: drag pans the canvas view

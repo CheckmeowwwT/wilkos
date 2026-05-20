@@ -332,6 +332,18 @@ class SceneEditorApp(
                             self.canvas_brush_size_input = self.canvas_brush_size_input[:-1]
                         elif event.unicode and event.unicode.isdigit():
                             self.canvas_brush_size_input += event.unicode
+                    elif self.workspace_mode == "canvas" and self.canvas_colorkey_focus and not cmd:
+                        if event.key == pygame.K_RETURN:
+                            self._canvas_apply_colorkey_removal()
+                            self.canvas_colorkey_focus = False
+                        elif event.key == pygame.K_ESCAPE:
+                            self.canvas_colorkey_focus = False
+                            self.status = "Color Key input dismissed."
+                        elif event.key == pygame.K_BACKSPACE:
+                            self.canvas_colorkey_input = self.canvas_colorkey_input[:-1]
+                        elif event.unicode and (event.unicode.isdigit() or event.unicode == ","):
+                            if len(self.canvas_colorkey_input) < 15:
+                                self.canvas_colorkey_input += event.unicode
                     elif self.workspace_mode == "canvas" and not cmd and event.key in {
                         pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5,
                     }:
@@ -458,6 +470,17 @@ class SceneEditorApp(
                         if self.canvas_selection_pixels:
                             self._canvas_enter_sel_transform("scale")
                         # (no-sel case: S without Cmd does nothing in canvas mode)
+                    elif (
+                        self.workspace_mode == "canvas"
+                        and event.key == pygame.K_RETURN
+                        and not cmd
+                        and self.canvas_tool == "colorkey"
+                        and not self.canvas_sel_transform
+                    ):
+                        # Tool is Color Key and nothing else is grabbing Enter →
+                        # apply the removal regardless of input-field focus state.
+                        self._canvas_apply_colorkey_removal()
+                        self.canvas_colorkey_focus = False
                     elif self.workspace_mode == "canvas" and event.key == pygame.K_RETURN and self.canvas_sel_transform:
                         self._canvas_commit_sel_transform()
                     elif self.workspace_mode == "canvas" and event.key == pygame.K_ESCAPE and self.canvas_sel_transform:
@@ -659,7 +682,7 @@ class SceneEditorApp(
                             # would re-lift pixels that the active transform already
                             # cleared from the canvas, wiping the selection.
                             if self.canvas_selection_pixels and not self.canvas_sel_transform:
-                                self._canvas_enter_sel_transform("move", auto_commit=True)
+                                self._canvas_enter_sel_transform("move", auto_commit=False)
                                 self.canvas_sel_drag_start = event.pos
                                 self.canvas_drawing = True
                             else:
@@ -708,17 +731,30 @@ class SceneEditorApp(
                         local = self._board_local_at(event.pos)
                         if self.drag_asset_path is not None:
                             if self.workspace_mode == "canvas":
-                                # Only open the asset if the drag ends over the canvas view.
+                                # Only act if the drag ends over the canvas view.
                                 view = self._canvas_view_rect(self._canvas_workspace_panel_rect())
                                 if view.collidepoint(event.pos) and self._canvas_editable(self.drag_asset_path):
-                                    self.canvas_doc.asset_rel = self.drag_asset_path
-                                    self.canvas_surface = None
-                                    self._sync_canvas_for_selection()
-                                    self.canvas_offset_x = 0.0
-                                    self.canvas_offset_y = 0.0
-                                    self._canvas_fit()
-                                    self._save_active_canvas_tab_state()
-                                    self.status = f"Loaded for editing: {self.drag_asset_path.rsplit('/', 1)[-1]}"
+                                    asset_name = self.drag_asset_path.rsplit('/', 1)[-1]
+                                    if self.canvas_surface is not None:
+                                        # Existing canvas with frames/layers → stamp on the
+                                        # active layer of the current frame so animation work
+                                        # is preserved.
+                                        if self._canvas_stamp_asset_on_current_layer(self.drag_asset_path):
+                                            self.status = (
+                                                f"Stamped {asset_name} onto frame "
+                                                f"{self.canvas_doc.frame_idx + 1}, layer "
+                                                f"{self.canvas_doc.layer_idx + 1}."
+                                            )
+                                    else:
+                                        # No canvas yet → load asset as a fresh canvas.
+                                        self.canvas_doc.asset_rel = self.drag_asset_path
+                                        self.canvas_surface = None
+                                        self._sync_canvas_for_selection()
+                                        self.canvas_offset_x = 0.0
+                                        self.canvas_offset_y = 0.0
+                                        self._canvas_fit()
+                                        self._save_active_canvas_tab_state()
+                                        self.status = f"Loaded for editing: {asset_name}"
                             elif local is not None:
                                 if not self._place_saved_scene_asset(self.drag_asset_path, local):
                                     self._place_new_sprite(self.drag_asset_path, local)
@@ -832,13 +868,13 @@ class SceneEditorApp(
                                 zoom_delta = precise_y if abs(precise_y) > abs(precise_x) else precise_x
                                 self._canvas_zoom_at(self.drag_pos, 1 if zoom_delta > 0 else -1)
                             else:
-                                # Selection nudge only when there's a settled
-                                # selection (no transform in flight). During a
-                                # rotate/scale/paste, fall back to view pan so
-                                # we don't re-lift the (already cleared) pixels
-                                # and destroy the selection.
+                                # Selection nudge starts or continues one
+                                # floating move. Other transforms keep scroll
+                                # as view pan.
                                 in_transform = self.canvas_sel_transform is not None
-                                if self.canvas_selection_pixels and not in_transform:
+                                if self.canvas_selection_pixels and (
+                                    not in_transform or self.canvas_sel_transform == "move"
+                                ):
                                     step_x = int(round(-precise_x * 8 / max(self.canvas_zoom, 0.001)))
                                     step_y = int(round(precise_y * 8 / max(self.canvas_zoom, 0.001)))
                                     if step_x == 0 and abs(precise_x) > 0.01:

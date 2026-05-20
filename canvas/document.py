@@ -45,6 +45,37 @@ class CanvasDocumentMixin:
             self.canvas_surface = None
         self._save_active_canvas_tab_state()
 
+    def _canvas_stamp_asset_on_current_layer(self, rel_path: str) -> bool:
+        """Drop an asset onto the active layer of the active frame.
+
+        Scales to fit canvas dimensions (preserving aspect), centers, and blits
+        on top so other frames and other layers stay intact. Used by the
+        canvas-mode asset drop so building animation frames doesn't wipe the
+        existing frames.
+        """
+        if self.canvas_surface is None or not self._canvas_editable(rel_path):
+            return False
+        path = self.asset_root / rel_path
+        try:
+            asset = pygame.image.load(path.as_posix()).convert_alpha()
+        except pygame.error:
+            self.status = "Could not load that asset."
+            return False
+        self._canvas_push_undo()
+        cw, ch = self.canvas_surface.get_size()
+        aw, ah = asset.get_size()
+        scale = min(1.0, cw / max(1, aw), ch / max(1, ah))
+        if scale < 1.0:
+            new_w = max(1, int(round(aw * scale)))
+            new_h = max(1, int(round(ah * scale)))
+            asset = pygame.transform.scale(asset, (new_w, new_h))
+            aw, ah = new_w, new_h
+        offset = ((cw - aw) // 2, (ch - ah) // 2)
+        self.canvas_surface.blit(asset, offset)
+        self._mark_canvas_changed()
+        self._save_active_canvas_tab_state()
+        return True
+
     def _canvas_tools_panel_rect(self) -> pygame.Rect:
         if self.workspace_mode == "canvas" and self.canvas_focus_mode:
             width = max(220, self.canvas_inspector_width)

@@ -116,6 +116,12 @@ class UIRenderMixin:
             pygame.draw.ellipse(surf, c, pygame.Rect(cx - s, cy - 3, s * 2, 6), 1)
             pygame.draw.ellipse(surf, c, pygame.Rect(cx - 3, cy - s, 6, s * 2), 1)
 
+        elif name == "colorkey":
+            # Swatch with a diagonal strike-through (remove this color).
+            rect_inner = pygame.Rect(cx - s, cy - s + 1, s * 2, s * 2 - 1)
+            pygame.draw.rect(surf, c, rect_inner, 1)
+            pygame.draw.line(surf, c, rect_inner.topleft, rect_inner.bottomright, 2)
+
         elif name == "light":
             mode = getattr(self, "canvas_light_mode", "bulb")
             if mode == "fire":
@@ -851,6 +857,34 @@ class UIRenderMixin:
             bdisp = input_display_text(self.canvas_blend_input, self.canvas_blend_focus, "50")
             ls = small.render(bdisp + "%", True, (210, 220, 240))
             screen.blit(ls, ls.get_rect(center=bf.center))
+
+            # ── Color Key input (R,G,B to wipe from current layer) ─
+            ck = self._canvas_colorkey_input_rect(panel)
+            is_colorkey_tool = self.canvas_tool == "colorkey"
+            label = "Remove R,G,B (Enter)" if is_colorkey_tool else "Remove R,G,B"
+            label_col = (200, 220, 240) if is_colorkey_tool else (110, 110, 122)
+            screen.blit(small.render(label, True, label_col), (panel.x + 8, ck.y - 14))
+            pygame.draw.rect(screen, (20, 20, 24), ck)
+            ck_border = (
+                (255, 180, 90) if (is_colorkey_tool and self.canvas_colorkey_focus)
+                else (100, 140, 210) if self.canvas_colorkey_focus
+                else (72, 72, 84)
+            )
+            pygame.draw.rect(screen, ck_border, ck, 1)
+            ck_disp = input_display_text(
+                self.canvas_colorkey_input,
+                self.canvas_colorkey_focus,
+                "255,255,255",
+            )
+            ls = small.render(ck_disp, True, (210, 220, 240) if is_colorkey_tool else (140, 140, 152))
+            screen.blit(ls, ls.get_rect(midleft=(ck.x + 6, ck.centery)))
+            # Preview swatch on the right edge so the user can confirm the color.
+            parsed = self._parse_colorkey_input(self.canvas_colorkey_input)
+            if parsed is not None:
+                pr, pg, pb = parsed
+                sw_rect = pygame.Rect(ck.right - 22, ck.y + 4, 16, ck.height - 8)
+                pygame.draw.rect(screen, (pr, pg, pb), sw_rect)
+                pygame.draw.rect(screen, (40, 40, 46), sw_rect, 1)
 
             # ── Color picker launcher ───────────────────────────
             color_rect = self._canvas_color_button_rect(panel)

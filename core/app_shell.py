@@ -57,6 +57,8 @@ class CoreAppMixin:
         self.scene_focus_mode: bool = False
         self.canvas_light_mode: str = "bulb"
         self.canvas_last_r_press_ms: int = -10000
+        self.canvas_colorkey_input: str = "255,255,255"
+        self.canvas_colorkey_focus: bool = False
         self.canvas_focus_layer_width: int = 260
         self.canvas_focus_tools_open: bool = False
         self.canvas_focus_tools_progress: float = 0.0
@@ -171,6 +173,7 @@ class CoreAppMixin:
         self.canvas_sel_auto_commit: bool = False
         self.canvas_sel_push_undo_on_commit: bool = False
         self.canvas_sel_surface: pygame.Surface | None = None
+        self.canvas_sel_source_surface: pygame.Surface | None = None
         self.canvas_sel_base_bbox: tuple[int, int, int, int] | None = None
         self.canvas_sel_scale_rect: tuple[float, float, float, float] | None = None
         self.canvas_sel_3d_x: float = 0.0

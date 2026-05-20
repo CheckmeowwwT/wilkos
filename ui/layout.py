@@ -164,6 +164,12 @@ class UILayoutMixin:
             pygame.Rect(panel.x + panel.width - 24, y, 24, 24),
         )
 
+    def _canvas_colorkey_input_rect(self, panel: pygame.Rect) -> pygame.Rect:
+        """Text field for the Color Key tool: 'R,G,B' to remove from the layer."""
+        bm, _, _ = self._canvas_blend_input_rects(panel)
+        y = bm.bottom + 20  # leaves room for the label
+        return pygame.Rect(panel.x + 8, y, panel.width - 16, 24)
+
     def _canvas_selection_action_rects(self, panel: pygame.Rect) -> dict[str, pygame.Rect]:
         """Selection transform buttons stacked below the color picker."""
         palette_rects = self._canvas_quick_palette_rects(panel)
@@ -188,8 +194,8 @@ class UILayoutMixin:
         return rects
 
     def _canvas_color_button_rect(self, panel: pygame.Rect) -> pygame.Rect:
-        bm, _, _ = self._canvas_blend_input_rects(panel)
-        return pygame.Rect(panel.x + 8, bm.bottom + 12, panel.width - 16, 42)
+        ck = self._canvas_colorkey_input_rect(panel)
+        return pygame.Rect(panel.x + 8, ck.bottom + 12, panel.width - 16, 42)
 
     def _canvas_quick_palette_rects(self, panel: pygame.Rect) -> list[pygame.Rect]:
         color_rect = self._canvas_color_button_rect(panel)
