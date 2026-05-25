@@ -47,6 +47,7 @@ class CanvasToolsMixin:
         ("select",     "Lasso Select"),
         ("rectselect", "Square Select"),
         ("eyedropper", "Pick"),
+        ("center",     "Center"),
         ("move",       "Move"),
         ("pencil",     "Pencil"),
         ("brush",      "Brush"),
@@ -68,6 +69,7 @@ class CanvasToolsMixin:
         "select":     "◇",
         "rectselect": "▣",
         "eyedropper": "⊙",
+        "center":     "✛",
         "move":       "⊕",
         "pencil":     "╱",
         "brush":      "○",
@@ -1459,18 +1461,40 @@ class CanvasToolsMixin:
 
     # ── Mirror helper ───────────────────────────────────────────────────
 
+    def _mirror_axes(self) -> tuple[float, float] | None:
+        """Return the (x, y) mirror axes in canvas coords, or None if no canvas."""
+        if self.canvas_surface is None:
+            return None
+        if self.canvas_mirror_center is not None:
+            cx, cy = self.canvas_mirror_center
+            return float(cx), float(cy)
+        sw, sh = self.canvas_surface.get_size()
+        return (sw - 1) / 2.0, (sh - 1) / 2.0
+
+    def _mirror_point(self, px: float, py: float, *, axis: str) -> tuple[int, int]:
+        """Reflect (px, py) across the active mirror axis ('h', 'v', or 'hv')."""
+        axes = self._mirror_axes()
+        if axes is None:
+            return int(round(px)), int(round(py))
+        cx, cy = axes
+        mx, my = px, py
+        if "h" in axis:
+            mx = 2.0 * cx - px
+        if "v" in axis:
+            my = 2.0 * cy - py
+        return int(round(mx)), int(round(my))
+
     def _mirror_positions(self, px: int, py: int) -> list[tuple[int, int]]:
         """Return all pixel positions to paint when mirror modes are active."""
         if self.canvas_surface is None:
             return [(px, py)]
-        sw, sh = self.canvas_surface.get_size()
         pts = [(px, py)]
         if self.canvas_mirror_h:
-            pts.append((sw - 1 - px, py))
+            pts.append(self._mirror_point(px, py, axis="h"))
         if self.canvas_mirror_v:
-            pts.append((px, sh - 1 - py))
+            pts.append(self._mirror_point(px, py, axis="v"))
         if self.canvas_mirror_h and self.canvas_mirror_v:
-            pts.append((sw - 1 - px, sh - 1 - py))
+            pts.append(self._mirror_point(px, py, axis="hv"))
         return list(dict.fromkeys(pts))
 
     def _mirror_point_pairs(
@@ -1905,20 +1929,22 @@ class CanvasToolsMixin:
         # Build list of (start, end) pairs including mirrors
         pairs = [(start, end)]
         if self.canvas_mirror_h or self.canvas_mirror_v:
-            sw, sh = self.canvas_surface.get_size()
             extras: list[tuple[tuple[int, int], tuple[int, int]]] = []
             if self.canvas_mirror_h:
-                ms = (sw - 1 - start[0], start[1])
-                me = (sw - 1 - end[0], end[1])
-                extras.append((ms, me))
+                extras.append((
+                    self._mirror_point(start[0], start[1], axis="h"),
+                    self._mirror_point(end[0], end[1], axis="h"),
+                ))
             if self.canvas_mirror_v:
-                ms2 = (start[0], sh - 1 - start[1])
-                me2 = (end[0], sh - 1 - end[1])
-                extras.append((ms2, me2))
+                extras.append((
+                    self._mirror_point(start[0], start[1], axis="v"),
+                    self._mirror_point(end[0], end[1], axis="v"),
+                ))
             if self.canvas_mirror_h and self.canvas_mirror_v:
-                ms3 = (sw - 1 - start[0], sh - 1 - start[1])
-                me3 = (sw - 1 - end[0], sh - 1 - end[1])
-                extras.append((ms3, me3))
+                extras.append((
+                    self._mirror_point(start[0], start[1], axis="hv"),
+                    self._mirror_point(end[0], end[1], axis="hv"),
+                ))
             pairs.extend(extras)
         dirty_points: list[tuple[int, int]] = []
         for s, e in pairs:
@@ -2746,8 +2772,15 @@ class CanvasToolsMixin:
         if tool == "eyedropper":
             if pixel and self.canvas_surface is not None:
                 sampled = self.canvas_surface.get_at(pixel)
-                self._set_canvas_color((sampled.r, sampled.g, sampled.b, 255))
-                self.status = f"Picked {self._canvas_color_hex()}."
+                self._set_canvas_color((sampled.r, sampled.g, sampled.b, sampled.a))
+                self.status = f"Picked {self._canvas_color_hex()} (alpha {sampled.a})."
+        elif tool == "center":
+            if pixel:
+                self.canvas_mirror_center = pixel
+                self.status = (
+                    f"Mirror center set to ({pixel[0]}, {pixel[1]}). "
+                    "Enable Mir H/V to mirror around this pixel."
+                )
         elif tool == "colorkey":
             # Click samples the pixel's RGB into the input. Hit Enter to wipe matches.
             if pixel and self.canvas_surface is not None:
