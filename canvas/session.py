@@ -158,13 +158,45 @@ class CanvasSession:
     def delete_current_tab(self, owner: object) -> str:
         """Delete the active canvas tab and return the status message."""
         if len(self.tabs) <= 1:
-            return "Cannot delete the only canvas tab."
+            removed_name = self.tab_name(self.tab_idx if self.tabs else 0)
+            # Wipe back to the startup blank-canvas placeholder state so the
+            # workspace looks like it did before any canvas existed.
+            self._reset_owner_to_placeholder(owner)
+            tab_name = removed_name if removed_name else self.next_tab_name()
+            self.tabs = [{"name": tab_name, "state": self.doc_state(owner)}]
+            self.tab_idx = 0
+            return f"Cleared {removed_name}. No canvases left."
         remove_idx = self.tab_idx
         removed_name = self.tab_name(remove_idx)
         self.tabs.pop(remove_idx)
         self.tab_idx = max(0, min(remove_idx, len(self.tabs) - 1))
         self.apply_doc_state(owner, self.tabs[self.tab_idx]["state"])  # type: ignore[arg-type]
         return f"Deleted {removed_name}."
+
+    def _reset_owner_to_placeholder(self, owner: object) -> None:
+        """Drop the owner back to the empty, pre-canvas state used at startup."""
+        owner.canvas_surface = None  # setter wipes frames/layers/caches
+        owner.canvas_asset_rel = None
+        owner.canvas_selection_pixels = set()
+        owner.canvas_lasso_pixels = []
+        owner.canvas_lasso_active = False
+        owner.canvas_rect_select_active = False
+        owner.canvas_rect_select_start = None
+        owner.canvas_rect_select_end = None
+        owner.canvas_paste_active = False
+        owner.canvas_paste_pixels = {}
+        owner.canvas_paste_origin = (0, 0)
+        owner.canvas_sel_transform = None
+        owner.canvas_sel_lift = {}
+        owner.canvas_sel_surface = None
+        owner.canvas_sel_source_surface = None
+        owner.canvas_sel_base_bbox = None
+        owner.canvas_sel_scale_rect = None
+        owner.canvas_vp = None
+        owner.canvas_preview_active = False
+        owner.canvas_focus_mode = False
+        owner.canvas_focus_tools_open = False
+        owner.canvas_focus_tools_progress = 0.0
 
     def tab_is_placeholder(self, idx: int | None = None) -> bool:
         """Report whether a tab still holds the initial empty canvas state."""
