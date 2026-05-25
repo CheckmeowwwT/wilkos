@@ -46,6 +46,12 @@ class UIRenderMixin:
             pygame.draw.circle(surf, c, (cx, cy), s - 1, 1)
             pygame.draw.circle(surf, c, (cx, cy), 2)
 
+        elif name == "center":
+            # Plus + small ring at intersection (mirror pivot indicator)
+            pygame.draw.line(surf, c, (cx - s, cy), (cx + s, cy), 1)
+            pygame.draw.line(surf, c, (cx, cy - s), (cx, cy + s), 1)
+            pygame.draw.circle(surf, c, (cx, cy), 3, 1)
+
         elif name == "move":
             # Cross with 4 arrowheads
             pygame.draw.line(surf, c, (cx - s, cy), (cx + s, cy), 1)
@@ -540,6 +546,19 @@ class UIRenderMixin:
             pygame.draw.line(screen, (255, 80, 80), (vpx - 8, vpy), (vpx + 8, vpy), 1)
             pygame.draw.line(screen, (255, 80, 80), (vpx, vpy - 8), (vpx, vpy + 8), 1)
             pygame.draw.circle(screen, (255, 80, 80), (vpx, vpy), 4, 1)
+
+        # ── Mirror center indicator ───────────────────────────────────
+        if self.canvas_mirror_center is not None and (
+            self.canvas_tool == "center"
+            or self.canvas_mirror_h
+            or self.canvas_mirror_v
+        ):
+            mcx = draw_rect.x + int((self.canvas_mirror_center[0] + 0.5) * self.canvas_zoom)
+            mcy = draw_rect.y + int((self.canvas_mirror_center[1] + 0.5) * self.canvas_zoom)
+            mc_color = (120, 220, 255)
+            pygame.draw.line(screen, mc_color, (mcx - 10, mcy), (mcx + 10, mcy), 1)
+            pygame.draw.line(screen, mc_color, (mcx, mcy - 10), (mcx, mcy + 10), 1)
+            pygame.draw.circle(screen, mc_color, (mcx, mcy), 5, 1)
 
         # ── Selection highlight ──────────────────────────────────────
         if self.canvas_selection_pixels and not self.canvas_sel_transform and visible_px_bounds is not None:
