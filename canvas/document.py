@@ -721,7 +721,10 @@ class CanvasDocumentMixin:
         self.canvas_doc.frame_names.insert(fi + 1, new_frame_name)
         self.canvas_doc.layer_names.insert(fi + 1, new_names)
         self.canvas_doc.layer_visible.insert(fi + 1, new_vis)
+        # Keep frame_versions in lockstep; cache keys after fi shifted, so drop them.
+        self.canvas_doc.frame_versions.insert(fi + 1, 0)
         self._sync_canvas_render_cache_state()
+        self._invalidate_canvas_render_cache(None)
         self.canvas_doc.frame_idx = fi + 1
         self.canvas_doc.selected_layers = {min(self.canvas_doc.layer_idx, len(new_frame) - 1)}
         self._sync_canvas_preview_to_current_frame()
@@ -736,7 +739,10 @@ class CanvasDocumentMixin:
         self.canvas_doc.frame_names.pop(fi)
         self.canvas_doc.layer_names.pop(fi)
         self.canvas_doc.layer_visible.pop(fi)
+        if fi < len(self.canvas_doc.frame_versions):
+            self.canvas_doc.frame_versions.pop(fi)
         self._sync_canvas_render_cache_state()
+        self._invalidate_canvas_render_cache(None)
         self.canvas_doc.frame_idx = min(fi, len(self.canvas_doc.frames) - 1)
         self.canvas_doc.layer_idx = min(self.canvas_doc.layer_idx, len(self.canvas_doc.frames[self.canvas_doc.frame_idx]) - 1)
         self._canvas_reset_layer_selection()
@@ -763,8 +769,10 @@ class CanvasDocumentMixin:
             return
         for seq in (self.canvas_doc.frames, self.canvas_doc.frame_names, self.canvas_doc.layer_names, self.canvas_doc.layer_visible):
             seq[fi], seq[target] = seq[target], seq[fi]
-        if fi < len(self.canvas_doc.frame_versions) and target < len(self.canvas_doc.frame_versions):
-            self.canvas_doc.frame_versions[fi], self.canvas_doc.frame_versions[target] = self.canvas_doc.frame_versions[target], self.canvas_doc.frame_versions[fi]
+        # The cache is keyed by (frame_idx, version); after the swap both indices
+        # point at new content, so bump versions and drop their cached surfaces.
+        self._invalidate_canvas_render_cache(fi)
+        self._invalidate_canvas_render_cache(target)
         self.canvas_doc.frame_idx = target
         self._canvas_reset_layer_selection()
         self._sync_canvas_preview_to_current_frame()
