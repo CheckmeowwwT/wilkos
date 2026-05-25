@@ -29,10 +29,12 @@ class CoreAppMixin:
         self.scene_dir = self.asset_root / "maps" / "scenes"
         self.scene_asset_dir = self.asset_root / "scenes"
         self.scene_json_dir = self.root / "json_scenes"
+        self.asset_json_dir = self.asset_root / "json"
         self.asset_root.mkdir(parents=True, exist_ok=True)
         self.scene_dir.mkdir(parents=True, exist_ok=True)
         self.scene_asset_dir.mkdir(parents=True, exist_ok=True)
         self.scene_json_dir.mkdir(parents=True, exist_ok=True)
+        self.asset_json_dir.mkdir(parents=True, exist_ok=True)
 
         self.min_window_size = (1100, 760)
         self.screen_width = 1440
@@ -150,6 +152,8 @@ class CoreAppMixin:
         # Mirror symmetry while drawing
         self.canvas_mirror_h: bool = False
         self.canvas_mirror_v: bool = False
+        # Custom mirror center (pixel coords). When None, mirror about canvas center.
+        self.canvas_mirror_center: tuple[int, int] | None = None
         # Asset browser visible in canvas mode (toggle via "Assets" button)
         self.canvas_assets_open: bool = False
         # Canvas bottom panel collapsed
